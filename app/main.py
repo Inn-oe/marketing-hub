@@ -18,6 +18,11 @@ app = FastAPI(title="Solar Automation Platform", lifespan=lifespan)
 app.include_router(webhook_router)
 
 
+@app.get("/")
+async def root() -> dict:
+    return {"service": "solar-automation", "status": "running", "health": "/health", "webhook": "/webhook"}
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"ok": True}

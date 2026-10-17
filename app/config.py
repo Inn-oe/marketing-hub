@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     model_main: str = "claude-sonnet-5-5"
     model_hard: str = "claude-opus-5-5"
 
+    timezone: str = "Africa/Harare"
+
     quote_value_cap: float = 5000
     quote_history_tolerance: float = 0.20
     price_max_age_days: int = 7

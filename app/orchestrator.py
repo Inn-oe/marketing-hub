@@ -9,6 +9,7 @@ from app.db.pool import pool
 from app.gateway.normalize import InboundMessage
 from app.meta import client as meta
 from app.quoting import service as quotes
+from app.scheduling import service as scheduling
 from app.staff import deliver_quote_to_client, get_staff, handle_staff
 
 log = logging.getLogger(__name__)
@@ -180,6 +181,59 @@ async def _run_quote_flow(msg: InboundMessage, contact_id: str, conversation_id:
             log.exception("Failed to alert director %s", d["wa_phone"])
 
 
+async def _run_scheduling_reply(msg: InboundMessage, conversation_id: str, last: str) -> bool:
+    """Deterministic YES/NO handling after a quote or a slot offer. Returns True if handled."""
+    async def say(text: str, intent: str | None = None) -> None:
+        await _send(msg, text)
+        await _record_outbound(conversation_id, text, intent=intent)
+
+    if last == "quote_sent" and scheduling.is_yes(msg.text):
+        quote = await pool().fetchrow(
+            "SELECT * FROM quotes WHERE conversation_id=$1 AND status='sent' ORDER BY created_at DESC LIMIT 1",
+            conversation_id,
+        )
+        if quote is None:
+            return False
+        job = await scheduling.create_job_from_quote(dict(quote))
+        offer = await scheduling.propose_slot(job)
+        if offer is None:
+            await _escalate_manual(conversation_id, f"No crew slot found for job {job['ref']}")
+            await say("Thank you for accepting! Our team will contact you shortly to arrange a date.")
+        else:
+            await say(offer[1], intent="slot_offer")
+        return True
+
+    if last == "slot_offer" and (scheduling.is_yes(msg.text) or scheduling.is_no(msg.text)):
+        job = await scheduling.latest_job_for_conversation(conversation_id)
+        if job is None:
+            return False
+        if scheduling.is_yes(msg.text):
+            await say(await scheduling.confirm_job(job), intent="slot_confirmed")
+            await pool().execute("UPDATE conversations SET state='ai_active' WHERE id=$1", conversation_id)
+            return True
+        await scheduling.decline_current(job["id"])
+        offer = await scheduling.propose_slot(job, await scheduling.declined_starts(job["id"]))
+        if offer is None:
+            await _escalate_manual(conversation_id, f"Client declined slots for job {job['ref']}; none left")
+            await say("No problem, a team member will contact you to find a date that suits you.")
+        else:
+            await say(offer[1], intent="slot_offer")
+        return True
+
+    return False
+
+
+async def _escalate_manual(conversation_id: str, reason: str) -> None:
+    async with pool().acquire() as conn, conn.transaction():
+        await conn.execute(
+            "INSERT INTO escalations (conversation_id, kind, reason, priority, sla_due_at) "
+            "VALUES ($1,'other',$2,2, now() + interval '4 hours')",
+            conversation_id,
+            reason,
+        )
+        await conn.execute("UPDATE conversations SET state='human_takeover' WHERE id=$1", conversation_id)
+
+
 async def handle_inbound(msg: InboundMessage) -> None:
     if msg.channel == "whatsapp":
         staff = await get_staff(msg.sender_id)
@@ -193,6 +247,11 @@ async def handle_inbound(msg: InboundMessage) -> None:
     contact_id, conversation_id, state = logged
     if state in ("human_takeover", "awaiting_director", "closed"):
         return  # a human holds this thread; the AI stays silent
+
+    last = await _last_outbound_intent(conversation_id)
+    if msg.channel == "whatsapp" and last in ("quote_sent", "slot_offer") and not ai.rule_based_call_request(msg.text):
+        if await _run_scheduling_reply(msg, conversation_id, last):
+            return
 
     intent = await ai.classify_intent(msg.text)
     if intent == "call_request":

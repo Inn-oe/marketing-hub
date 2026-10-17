@@ -1,7 +1,7 @@
 """Load sample catalogue and staff. Run once after the first deploy:  python -m scripts.seed
 
 SAMPLE PRICES ARE PLACEHOLDERS. Replace with real stock data before any quote reaches a client.
-Set DIRECTOR_PHONE (digits only, international format) so Director approvals have somewhere to go.
+Set DIRECTOR_PHONE and CREW_LEAD_PHONE (digits only, international format) so approvals and rosters have somewhere to go.
 """
 import asyncio
 import json
@@ -33,6 +33,17 @@ async def main() -> None:
                 "INSERT INTO stock_levels (product_id, qty_on_hand, unit_price, unit_cost) VALUES ($1,$2,$3,$3*0.8) "
                 "ON CONFLICT (product_id) DO UPDATE SET qty_on_hand=EXCLUDED.qty_on_hand, unit_price=EXCLUDED.unit_price, updated_at=now()",
                 pid, qty, price,
+            )
+        crew_id = await conn.fetchval("SELECT id FROM crews WHERE name='Crew A'")
+        if crew_id is None:
+            crew_id = await conn.fetchval(
+                "INSERT INTO crews (name, skills) VALUES ('Crew A', ARRAY['install','electrical']) RETURNING id"
+            )
+        if lead := os.environ.get("CREW_LEAD_PHONE"):
+            await conn.execute(
+                "INSERT INTO staff_users (name, wa_phone, role, crew_id) VALUES ('Crew A lead',$1,'crew_lead',$2) "
+                "ON CONFLICT (wa_phone) DO UPDATE SET role='crew_lead', crew_id=$2",
+                lead, crew_id,
             )
         if phone := os.environ.get("DIRECTOR_PHONE"):
             await conn.execute(

@@ -1,11 +1,13 @@
 """Commands from whitelisted staff WhatsApp numbers (Director approvals, status)."""
 import logging
 import re
+from datetime import datetime, timedelta
 
 from app.db.pool import pool
 from app.gateway.normalize import InboundMessage
 from app.meta import client as meta
 from app.quoting import service as quotes
+from app.scheduling import service as scheduling
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +32,7 @@ async def deliver_quote_to_client(quote: dict, lines: list[dict]) -> None:
     text = quotes.format_quote_for_client(quote, lines)
     await meta.send_whatsapp_text(ident["wa_number_id"], ident["external_id"], text)
     await pool().execute(
-        "INSERT INTO messages (conversation_id, direction, sender, type, body) VALUES ($1,'out','staff','text',$2)",
+        "INSERT INTO messages (conversation_id, direction, sender, type, body, intent) VALUES ($1,'out','staff','text',$2,'quote_sent')",
         quote["conversation_id"],
         text,
     )
@@ -90,6 +92,11 @@ async def handle_staff(msg: InboundMessage, staff) -> bool:
             quote["conversation_id"],
         )
         await reply("Price set and quote sent to the client.")
+        return True
+
+    if text.lower() in ("jobs", "jobs today", "jobs tomorrow"):
+        day = datetime.now(scheduling.tz()).date() + timedelta(days=1 if text.lower().endswith("tomorrow") else 0)
+        await reply(await scheduling.jobs_summary(day))
         return True
 
     if text.lower() == "status":
